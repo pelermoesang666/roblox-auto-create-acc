@@ -1,2 +1,3 @@
 # roblox-auto-create-acc
-auto create account on roblox.com
+npm install
+node register.js
