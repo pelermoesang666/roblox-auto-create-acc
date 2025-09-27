@@ -1,16 +1,15 @@
 {
-  "name": "roblox-register-bot",
+  "name": "roblox-register-captcha",
   "version": "1.0.0",
-  "description": "Roblox auto register bot",
+  "description": "Roblox register with advanced captcha detection",
   "main": "register.js",
   "scripts": {
     "start": "node register.js",
     "test": "node register.js 1"
   },
   "dependencies": {
-    "puppeteer": "^24.22.3",
-    "puppeteer-core": "^24.22.3",
     "puppeteer-extra": "^3.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "axios": "^1.6.0"
   }
 }
