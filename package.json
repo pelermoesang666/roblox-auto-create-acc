@@ -1,0 +1,16 @@
+{
+  "name": "roblox-register-bot",
+  "version": "1.0.0",
+  "description": "Roblox auto register bot",
+  "main": "register.js",
+  "scripts": {
+    "start": "node register.js",
+    "test": "node register.js 1"
+  },
+  "dependencies": {
+    "puppeteer": "^24.22.3",
+    "puppeteer-core": "^24.22.3",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
