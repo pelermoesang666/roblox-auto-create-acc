@@ -2,8 +2,84 @@ const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const fs = require('fs');
 const { execSync } = require('child_process');
+const axios = require('axios');
 
 puppeteer.use(StealthPlugin());
+
+class CaptchaSolver {
+    constructor(apiKey) {
+        this.apiKey = apiKey;
+        this.baseUrl = 'https://2captcha.com';
+    }
+
+    async solveArkoseCaptcha(pageUrl, siteKey = 'A2A14B03-D9BC-FFB1-1463-920C5B9311AD') {
+        try {
+            console.log('🔍 Sending captcha to 2Captcha...');
+            
+            const submitData = {
+                key: this.apiKey,
+                method: 'funcaptcha',
+                publickey: siteKey,
+                pageurl: pageUrl,
+                surl: 'https://roblox-api.arkoselabs.com',
+                json: 1
+            };
+
+            console.log('📦 Captcha data:', {
+                pageurl: pageUrl,
+                publickey: siteKey
+            });
+
+            const submitResponse = await axios.post(`${this.baseUrl}/in.php`, submitData, {
+                timeout: 30000
+            });
+
+            if (submitResponse.data.status !== 1) {
+                throw new Error(`Failed to submit captcha: ${submitResponse.data.request}`);
+            }
+
+            const captchaId = submitResponse.data.request;
+            console.log(`✅ Captcha submitted, ID: ${captchaId}`);
+
+            // Tunggu hasil solving (max 3 menit)
+            for (let i = 0; i < 36; i++) {
+                await this.delay(5000); // Check setiap 5 detik
+                
+                try {
+                    const resultResponse = await axios.get(`${this.baseUrl}/res.php`, {
+                        params: {
+                            key: this.apiKey,
+                            action: 'get',
+                            id: captchaId,
+                            json: 1
+                        },
+                        timeout: 10000
+                    });
+
+                    if (resultResponse.data.status === 1) {
+                        console.log('✅ Captcha solved successfully!');
+                        return resultResponse.data.request; // Return token
+                    } else if (resultResponse.data.request !== 'CAPCHA_NOT_READY') {
+                        throw new Error(`Captcha solving error: ${resultResponse.data.request}`);
+                    }
+
+                    console.log(`⏳ Waiting for captcha solution... (${i + 1}/36)`);
+                } catch (error) {
+                    console.log(`⚠️ Error checking captcha status: ${error.message}`);
+                }
+            }
+
+            throw new Error('Timeout solving captcha (3 minutes)');
+        } catch (error) {
+            console.error('❌ Error solving captcha:', error.message);
+            return null;
+        }
+    }
+
+    async delay(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+}
 
 class ChromeFinder {
     static findChromePath() {
@@ -32,6 +108,7 @@ class RobloxRegister {
         this.currentUsernameIndex = 1;
         this.currentEmailIndex = 0;
         this.chromePath = ChromeFinder.findChromePath();
+        this.captchaSolver = new CaptchaSolver('YOUR_API_KEY');
     }
 
     loadData() {
@@ -82,8 +159,7 @@ class RobloxRegister {
                 '--window-size=1400,900',
                 '--start-maximized'
             ],
-            ignoreHTTPSErrors: true,
-            slowMo: 100
+            ignoreHTTPSErrors: true
         };
 
         this.browser = await puppeteer.launch(browserOptions);
@@ -96,7 +172,7 @@ class RobloxRegister {
 
     async takeScreenshot(name) {
         try {
-            await this.page.screenshot({ path: `screenshot-${name}.png`, fullPage: true });
+            await this.page.screenshot({ path: `screenshot-${name}.png` });
             console.log(`📸 Screenshot saved: screenshot-${name}.png`);
         } catch (error) {
             console.log('❌ Failed to take screenshot');
@@ -108,29 +184,237 @@ class RobloxRegister {
         
         for (const selector of selectorTypes) {
             try {
-                console.log(`🔍 Searching for: ${selector}`);
-                
                 if (selector.startsWith('//')) {
                     await this.page.waitForXPath(selector, { timeout: timeout });
                     const elements = await this.page.$x(selector);
                     if (elements.length > 0) {
-                        console.log(`✅ Found element with XPath: ${selector}`);
                         return elements[0];
                     }
                 } else {
                     await this.page.waitForSelector(selector, { timeout: timeout });
                     const element = await this.page.$(selector);
                     if (element) {
-                        console.log(`✅ Found element with CSS: ${selector}`);
                         return element;
                     }
                 }
             } catch (error) {
-                console.log(`❌ Not found: ${selector}`);
+                // Continue to next selector
             }
         }
-        console.log(`❌ All selectors not found: ${selectorTypes.join(', ')}`);
         return null;
+    }
+
+    async detectCaptcha() {
+        console.log('🔍 Checking for captcha...');
+        
+        try {
+            // Check multiple indicators of captcha presence
+            const captchaIndicators = await this.page.evaluate(() => {
+                const indicators = {
+                    hasArkoseIframe: false,
+                    hasFunCaptcha: false,
+                    hasCaptchaText: false,
+                    hasChallenge: false,
+                    url: window.location.href
+                };
+
+                // Check for Arkose Labs iframe
+                const iframes = document.querySelectorAll('iframe');
+                iframes.forEach(iframe => {
+                    const src = iframe.src || '';
+                    if (src.includes('arkoselabs.com') || src.includes('funcaptcha')) {
+                        indicators.hasArkoseIframe = true;
+                    }
+                });
+
+                // Check for FunCaptcha elements
+                if (document.querySelector('.fc-container') || 
+                    document.querySelector('[class*="arkose"]') ||
+                    document.querySelector('#FunCaptcha')) {
+                    indicators.hasFunCaptcha = true;
+                }
+
+                // Check for captcha-related text
+                const bodyText = document.body.innerText.toLowerCase();
+                if (bodyText.includes('captcha') || 
+                    bodyText.includes('robot') || 
+                    bodyText.includes('verify') ||
+                    bodyText.includes('challenge')) {
+                    indicators.hasCaptchaText = true;
+                }
+
+                // Check URL for captcha indicators
+                if (indicators.url.includes('captcha') || 
+                    indicators.url.includes('verify') ||
+                    indicators.url.includes('challenge')) {
+                    indicators.hasChallenge = true;
+                }
+
+                return indicators;
+            });
+
+            console.log('📊 Captcha detection results:', captchaIndicators);
+
+            // Jika ada indikator captcha
+            if (captchaIndicators.hasArkoseIframe || 
+                captchaIndicators.hasFunCaptcha || 
+                captchaIndicators.hasChallenge) {
+                console.log('🎯 CAPTCHA DETECTED!');
+                return true;
+            }
+
+            // Additional check: Look for captcha elements directly
+            const captchaElements = [
+                '.fc-container',
+                '[class*="arkose"]',
+                '#FunCaptcha',
+                'iframe[src*="arkoselabs"]',
+                'iframe[src*="funcaptcha"]'
+            ];
+
+            for (const selector of captchaElements) {
+                const element = await this.findElement(selector, 2000);
+                if (element) {
+                    console.log(`✅ Captcha element found: ${selector}`);
+                    return true;
+                }
+            }
+
+            console.log('✅ No captcha detected');
+            return false;
+
+        } catch (error) {
+            console.error('❌ Error detecting captcha:', error.message);
+            return false;
+        }
+    }
+
+    async solveCaptchaAutomatically() {
+        try {
+            console.log('🤖 Starting automatic captcha solving...');
+            
+            const currentUrl = this.page.url();
+            console.log(`🔗 Current URL: ${currentUrl}`);
+            
+            // Site key untuk Roblox Arkose Labs
+            const siteKey = 'A2A14B03-D9BC-FFB1-1463-920C5B9311AD';
+            
+            console.log('🔑 Using site key:', siteKey);
+            
+            // Solve captcha menggunakan 2Captcha
+            const token = await this.captchaSolver.solveArkoseCaptcha(currentUrl, siteKey);
+            
+            if (!token) {
+                throw new Error('Failed to get captcha token from 2Captcha');
+            }
+
+            console.log('✅ Captcha token received:', token.substring(0, 50) + '...');
+
+            // Inject token ke halaman
+            const injectionResult = await this.page.evaluate((token) => {
+                try {
+                    // Coba berbagai method untuk submit token
+                    if (window.fc_solve) {
+                        window.fc_solve(token);
+                        return 'fc_solve_called';
+                    }
+                    
+                    // Cari input hidden untuk token
+                    const tokenInput = document.querySelector('input[name="fc-token"], input[name="captcha_token"]');
+                    if (tokenInput) {
+                        tokenInput.value = token;
+                        return 'token_input_filled';
+                    }
+                    
+                    // Coba trigger event
+                    const event = new Event('captchaSolved');
+                    window.dispatchEvent(event);
+                    
+                    return 'event_dispatched';
+                } catch (error) {
+                    return 'error: ' + error.message;
+                }
+            }, token);
+
+            console.log('🔧 Token injection result:', injectionResult);
+            
+            // Tunggu sebentar setelah inject token
+            await this.delay(3000);
+            
+            // Coba submit form jika masih ada
+            const submitButton = await this.findElement([
+                'button[type="submit"]',
+                'input[type="submit"]',
+                '.btn-primary',
+                'button:contains("Submit")',
+                'button:contains("Verify")'
+            ]);
+            
+            if (submitButton) {
+                console.log('🚀 Clicking submit button after captcha...');
+                await submitButton.click();
+                await this.delay(5000);
+            }
+
+            return true;
+
+        } catch (error) {
+            console.error('❌ Automatic captcha solving failed:', error.message);
+            return false;
+        }
+    }
+
+    async handleCaptcha() {
+        console.log('🎯 Handling captcha...');
+        
+        const captchaDetected = await this.detectCaptcha();
+        
+        if (!captchaDetected) {
+            console.log('✅ No captcha to handle');
+            return true;
+        }
+
+        await this.takeScreenshot('before-captcha');
+
+        // Coba solve otomatis dulu
+        console.log('🔄 Attempting automatic captcha solving...');
+        const autoSolved = await this.solveCaptchaAutomatically();
+        
+        if (autoSolved) {
+            // Tunggu dan verifikasi captcha solved
+            await this.delay(5000);
+            
+            const stillCaptcha = await this.detectCaptcha();
+            if (!stillCaptcha) {
+                console.log('✅ Captcha solved automatically!');
+                await this.takeScreenshot('after-captcha-auto');
+                return true;
+            }
+        }
+
+        // Fallback ke manual solving
+        console.log('🔄 Fallback to manual captcha solving...');
+        console.log('⏳ Please solve the captcha manually in the browser window...');
+        console.log('💡 You have 3 minutes to solve the captcha');
+        
+        const startTime = Date.now();
+        const timeout = 180000; // 3 menit
+        
+        while (Date.now() - startTime < timeout) {
+            const stillHasCaptcha = await this.detectCaptcha();
+            
+            if (!stillHasCaptcha) {
+                console.log('✅ Manual captcha solved!');
+                await this.takeScreenshot('after-captcha-manual');
+                return true;
+            }
+            
+            await this.delay(10000); // Check setiap 10 detik
+            console.log('⏳ Still waiting for manual captcha solution...');
+        }
+        
+        console.log('❌ Captcha solving timeout');
+        return false;
     }
 
     async fillField(selector, value, fieldName) {
@@ -141,17 +425,17 @@ class RobloxRegister {
             }
 
             await element.click({ clickCount: 3 });
-            await this.delay(500);
+            await this.delay(300);
             await element.press('Backspace');
-            await this.delay(500);
+            await this.delay(300);
 
-            await element.type(value, { delay: 80 });
-            await this.delay(1500);
+            await element.type(value, { delay: 50 });
+            await this.delay(1000);
 
-            console.log(`✅ ${fieldName} filled: ${value}`);
+            console.log(`✅ ${fieldName} filled`);
             return true;
         } catch (error) {
-            throw new Error(`Failed to fill ${fieldName}: ${error.message}`);
+            throw new Error(`Failed to fill ${fieldName}`);
         }
     }
 
@@ -160,30 +444,23 @@ class RobloxRegister {
             const usernameSelectors = [
                 '//*[@id="signup-username"]',
                 'input[name="username"]',
-                '#signup-username',
-                'input[type="text"][placeholder*="username" i]',
-                'input[data-testid="username-input"]'
+                '#signup-username'
             ];
 
             await this.fillField(usernameSelectors, username, 'Username');
-            await this.delay(3000);
+            await this.delay(2000);
 
             const errorSelectors = [
                 '//*[@id="signup-usernameInputValidation"]',
-                '.validation-error',
-                '.error-message',
-                '[class*="error"]',
-                '[class*="invalid"]'
+                '.validation-error'
             ];
 
             for (const selector of errorSelectors) {
-                const errorElement = await this.findElement(selector, 3000);
+                const errorElement = await this.findElement(selector, 2000);
                 if (errorElement) {
                     const errorText = await this.page.evaluate(el => el.textContent, errorElement);
-                    console.log(`📝 Error text: ${errorText}`);
                     if (errorText.toLowerCase().includes('already') || 
-                        errorText.toLowerCase().includes('taken') ||
-                        errorText.toLowerCase().includes('unavailable')) {
+                        errorText.toLowerCase().includes('taken')) {
                         return false;
                     }
                 }
@@ -191,249 +468,124 @@ class RobloxRegister {
 
             return true;
         } catch (error) {
-            console.log(`⚠️ Error checking username: ${error.message}`);
             return false;
         }
     }
 
     async selectBirthday() {
-        console.log('📅 Filling birthday information...');
+        console.log('📅 Filling birthday...');
         
         try {
-            const monthSelectors = [
-                '//*[@id="MonthDropdown"]',
-                'select[name="birthdayMonth"]',
-                '#MonthDropdown',
-                'select[aria-label*="month" i]',
-                'select[data-testid*="month" i]',
-                'select:nth-of-type(1)'
-            ];
-
-            const monthDropdown = await this.findElement(monthSelectors);
-            if (!monthDropdown) {
-                await this.takeScreenshot('month-dropdown-missing');
-                throw new Error('Month dropdown not found');
-            }
-
-            console.log('✅ Month dropdown found, selecting November (11)...');
+            const monthDropdown = await this.findElement(['//*[@id="MonthDropdown"]']);
+            if (!monthDropdown) throw new Error('Month dropdown not found');
             await monthDropdown.select('11');
-            await this.delay(2000);
-
-            const daySelectors = [
-                '//*[@id="DayDropdown"]',
-                'select[name="birthdayDay"]',
-                '#DayDropdown',
-                'select[aria-label*="day" i]',
-                'select[data-testid*="day" i]',
-                'select:nth-of-type(2)'
-            ];
-
-            const dayDropdown = await this.findElement(daySelectors);
-            if (!dayDropdown) {
-                throw new Error('Day dropdown not found');
-            }
-
-            console.log('✅ Day dropdown found, selecting 11...');
+            
+            const dayDropdown = await this.findElement(['//*[@id="DayDropdown"]']);
+            if (!dayDropdown) throw new Error('Day dropdown not found');
             await dayDropdown.select('11');
-            await this.delay(2000);
-
-            const yearSelectors = [
-                '//*[@id="YearDropdown"]',
-                'select[name="birthdayYear"]',
-                '#YearDropdown',
-                'select[aria-label*="year" i]',
-                'select[data-testid*="year" i]',
-                'select:nth-of-type(3)'
-            ];
-
-            const yearDropdown = await this.findElement(yearSelectors);
-            if (!yearDropdown) {
-                throw new Error('Year dropdown not found');
-            }
-
-            console.log('✅ Year dropdown found, selecting 1999...');
+            
+            const yearDropdown = await this.findElement(['//*[@id="YearDropdown"]']);
+            if (!yearDropdown) throw new Error('Year dropdown not found');
             await yearDropdown.select('1999');
-            await this.delay(2000);
 
-            console.log('✅ Birthday filled successfully');
+            await this.delay(1000);
             return true;
-
         } catch (error) {
-            await this.takeScreenshot('birthday-error');
             throw new Error(`Failed to select birthday: ${error.message}`);
         }
-    }
-
-    async clickCheckbox() {
-        console.log('☑️ Looking for checkbox...');
-        
-        const checkboxSelectors = [
-            '//*[@id="signup-checkbox"]',
-            'input[type="checkbox"]',
-            '.checkbox',
-            '#signup-checkbox',
-            'input[name="terms"]',
-            'input[aria-label*="agree" i]'
-        ];
-        
-        const checkbox = await this.findElement(checkboxSelectors, 5000);
-        
-        if (checkbox) {
-            console.log('✅ Checkbox found, clicking...');
-            
-            const isChecked = await this.page.evaluate((element) => {
-                return element.checked;
-            }, checkbox);
-            
-            if (!isChecked) {
-                await checkbox.click();
-                await this.delay(1500);
-                
-                const isNowChecked = await this.page.evaluate((element) => {
-                    return element.checked;
-                }, checkbox);
-                
-                if (isNowChecked) {
-                    console.log('✅ Checkbox successfully checked');
-                } else {
-                    console.log('⚠️ Checkbox may not be checked properly');
-                }
-            } else {
-                console.log('✅ Checkbox already checked');
-            }
-            
-            return true;
-        } else {
-            console.log('⚠️ Checkbox not found, continuing without checking...');
-            return false;
-        }
-    }
-
-    async clickSignupButton() {
-        console.log('🚀 Looking for signup button...');
-        
-        const signupButtonSelectors = [
-            '//*[@id="signup-button"]',
-            'button[type="submit"]',
-            'button[id*="signup"]',
-            '#signup-button',
-            'button[data-testid*="signup" i]',
-            'button:contains("Sign Up")',
-            'button:contains("Register")'
-        ];
-        
-        const signupButton = await this.findElement(signupButtonSelectors);
-        
-        if (!signupButton) {
-            await this.takeScreenshot('signup-button-missing');
-            throw new Error('Signup button not found');
-        }
-        
-        console.log('✅ Signup button found, clicking...');
-        await signupButton.click();
-        await this.delay(5000);
-        
-        return true;
     }
 
     async registerAccount(accountNumber) {
         console.log(`\n📝 Starting registration for account #${accountNumber}`);
         
         try {
+            // Step 1: Navigate to registration page
             console.log('🌐 Navigating to registration page...');
             await this.page.goto('https://www.roblox.com/', {
                 waitUntil: 'networkidle2',
-                timeout: 40000
+                timeout: 30000
             });
-            await this.delay(5000);
-            await this.takeScreenshot('01-page-loaded');
+            await this.delay(4000);
 
+            // Step 2: Check for initial captcha
+            await this.handleCaptcha();
+
+            // Step 3: Find available username
             let username;
             let usernameAvailable = false;
             let attempts = 0;
 
-            while (!usernameAvailable && attempts < 5) {
+            while (!usernameAvailable && attempts < 10) {
                 username = `${this.usernameBase}${this.currentUsernameIndex.toString().padStart(5, '0')}`;
-                console.log(`🔍 Testing username: ${username} (Attempt ${attempts + 1})`);
+                console.log(`🔍 Testing username: ${username}`);
 
                 usernameAvailable = await this.checkUsernameAvailability(username);
                 
                 if (!usernameAvailable) {
-                    console.log(`❌ Username ${username} is taken`);
                     this.currentUsernameIndex++;
                     attempts++;
-                    await this.delay(2000);
+                    await this.delay(1000);
                 }
             }
 
             if (!usernameAvailable) {
-                throw new Error('Could not find available username after 5 attempts');
+                throw new Error('Could not find available username');
             }
 
-            console.log(`✅ Username ${username} is available`);
-            await this.takeScreenshot('02-username-filled');
-
+            // Step 4: Fill password
             const password = "@Grimgarenyawdesu90";
-            const passwordSelectors = [
-                '//*[@id="signup-password"]',
-                'input[name="password"]',
-                'input[type="password"]',
-                '#signup-password',
-                'input[data-testid="password-input"]'
-            ];
-            
-            await this.fillField(passwordSelectors, password, 'Password');
-            await this.takeScreenshot('03-password-filled');
+            await this.fillField(['//*[@id="signup-password"]'], password, 'Password');
 
+            // Step 5: Fill birthday
             await this.selectBirthday();
-            await this.takeScreenshot('04-birthday-filled');
 
-            await this.clickCheckbox();
-            await this.takeScreenshot('05-checkbox-clicked');
-
-            await this.clickSignupButton();
-            await this.takeScreenshot('06-after-signup-click');
-
-            const currentUrl = this.page.url();
-            console.log(`🔗 Current URL: ${currentUrl}`);
-
-            if (currentUrl.includes('captcha') || currentUrl.includes('verify')) {
-                console.log('🎯 Captcha detected! Please solve manually...');
-                console.log('⏳ Waiting 2 minutes for manual solving...');
-                
-                const startTime = Date.now();
-                while (Date.now() - startTime < 120000) {
-                    const url = this.page.url();
-                    if (url.includes('home') || url.includes('welcome')) {
-                        console.log('✅ Captcha solved!');
-                        break;
-                    }
-                    await this.delay(5000);
-                    console.log('⏳ Still waiting for captcha solution...');
-                }
+            // Step 6: Click checkbox
+            const checkbox = await this.findElement(['//*[@id="signup-checkbox"]']);
+            if (checkbox) {
+                await checkbox.click();
+                await this.delay(1000);
             }
 
+            // Step 7: Click signup button
+            const signupButton = await this.findElement(['//*[@id="signup-button"]']);
+            if (!signupButton) {
+                throw new Error('Signup button not found');
+            }
+
+            await signupButton.click();
+            await this.delay(5000);
+
+            // Step 8: Handle captcha after signup click
+            const captchaHandled = await this.handleCaptcha();
+            
+            if (!captchaHandled) {
+                throw new Error('Captcha not solved');
+            }
+
+            // Step 9: Verify success
             await this.delay(5000);
             const finalUrl = this.page.url();
-            console.log(`🔗 Final URL: ${finalUrl}`);
             
-            if (finalUrl.includes('home') || finalUrl.includes('welcome') || finalUrl.includes('roblox.com')) {
+            // Lebih flexible dalam mendefinisikan success
+            if (finalUrl.includes('home') || 
+                finalUrl.includes('welcome') || 
+                finalUrl.includes('roblox.com') &&
+                !finalUrl.includes('captcha') &&
+                !finalUrl.includes('verify')) {
                 console.log('✅ Registration successful!');
                 return { username, password, success: true };
             } else {
-                await this.takeScreenshot('07-registration-failed');
-                throw new Error('Registration failed - not redirected to home');
+                throw new Error('Registration failed - not redirected to success page');
             }
 
         } catch (error) {
-            await this.takeScreenshot('error-' + accountNumber);
             console.error(`❌ Registration failed: ${error.message}`);
             return { success: false, error: error.message };
         }
     }
 
     async run(accountCount = 1) {
-        console.log('🤖 Starting Roblox Register Bot with Debugging\n');
+        console.log('🤖 Starting Roblox Register Bot with Advanced Captcha Detection\n');
         this.loadData();
 
         try {
@@ -498,11 +650,13 @@ class RobloxRegister {
     }
 }
 
+// Install: npm install puppeteer-extra puppeteer-extra-plugin-stealth axios
+
 const bot = new RobloxRegister();
 const accountCount = process.argv[2] ? parseInt(process.argv[2]) : 1;
 
 if (accountCount > 0) {
     bot.run(accountCount);
 } else {
-    console.log('Usage: node register.js [number_of_accounts]');
+    console.log('Usage: node register-captcha-fixed.js [number_of_accounts]');
 }
