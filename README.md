@@ -1,3 +1,2 @@
-# roblox-auto-create-acc
-npm install
-node register.js
+# npm install
+# node register.js
